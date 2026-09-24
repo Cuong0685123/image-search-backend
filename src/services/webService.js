@@ -2,14 +2,15 @@ import axios from 'axios';
 import https from 'https';
 import * as cheerio from 'cheerio';
 import puppeteer from 'puppeteer';
+
 const httpsAgent = new https.Agent({
   keepAlive: true,
   rejectUnauthorized: false,
 });
+
 let browserInstance = null;
 
 async function getBrowser() {
-  // Kiểm tra an toàn: hỗ trợ cả browser.connected và browser.isConnected()
   const isAlive =
     browserInstance &&
     (typeof browserInstance.isConnected === 'function'
@@ -27,31 +28,37 @@ async function getBrowser() {
       ],
     });
 
-    // Reset biến nếu trình duyệt bị tắt đột ngột
     browserInstance.on('disconnected', () => {
       browserInstance = null;
     });
   }
   return browserInstance;
 }
+
 export async function fetchWebResults(query, page = 1, options = {}) {
   const { engine = 'bing' } = options;
 
   if (engine === 'yandex') {
     return await fetchYandexWeb(query, page);
   }
-if (engine === 'duckduckgo') {
-    return await fetchDuckDuckGoWeb(query, page);
+  if (engine === 'duckduckgo') {
+    return await fetchDuckDuckGoLiteDirect(query, page);
   }
-  return await fetchBingWeb(query, page);
+
+  // Mặc định Bing, nếu Bing rỗng thì tự động fallback DuckDuckGo
+  const bingResults = await fetchBingWeb(query, page);
+  if (bingResults && bingResults.length > 0) {
+    return bingResults;
+  }
+
+  console.log(`[Fallback] Bing rỗng, chuyển sang DuckDuckGo cho từ khóa: ${query}`);
+  return await fetchDuckDuckGoLiteDirect(query, page);
 }
 
-// ====================== BING WEB (RSS / CLEAN ENDPOINT) ======================
+// ====================== BING WEB ======================
 async function fetchBingWeb(query, page = 1) {
   const cleanQuery = encodeURIComponent(query.trim());
   const first = (Math.max(1, page) - 1) * 10 + 1;
-  
-  // Endpoint RSS của Bing: siêu nhẹ, chuẩn phân trang, không bao giờ bị trùng kết quả
   const targetUrl = `https://www.bing.com/search?q=${cleanQuery}&format=rss&first=${first}`;
 
   let xmlData = '';
@@ -60,26 +67,19 @@ async function fetchBingWeb(query, page = 1) {
       httpsAgent,
       headers: {
         'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
         'Accept': 'text/xml,application/xml,application/xhtml+xml,text/html;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
       },
-      timeout: 9000,
+      timeout: 8000,
     });
     xmlData = res.data;
-  } catch (errDirect) {
-    try {
-      const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`;
-      const proxyRes = await axios.get(proxyUrl, { timeout: 12000 });
-      xmlData = proxyRes.data;
-    } catch {
-      return [];
-    }
+  } catch (err) {
+    return [];
   }
 
   if (!xmlData || typeof xmlData !== 'string') return [];
 
-  // Parse dữ liệu XML bằng cheerio với xmlMode = true
   const $ = cheerio.load(xmlData, { xmlMode: true });
   const results = [];
   const seenUrls = new Set();
@@ -104,7 +104,6 @@ async function fetchBingWeb(query, page = 1) {
         title,
         url: rawUrl,
         domain,
-        // Loại bỏ các thẻ HTML rác trong snippet nếu có
         snippet: snippet.replace(/<[^>]*>?/gm, '').trim(),
         engine: 'bing',
       });
@@ -113,19 +112,91 @@ async function fetchBingWeb(query, page = 1) {
 
   return results;
 }
+
+// ====================== DUCKDUCKGO LITE DIRECT (SIÊU NHẸ, KHÔNG BỊ CHẶN) ======================
+async function fetchDuckDuckGoLiteDirect(query, page = 1) {
+  const cleanQuery = encodeURIComponent(query.trim());
+  const sOffset = (Math.max(1, page) - 1) * 30;
+  const targetUrl = `https://html.duckduckgo.com/html/?q=${cleanQuery}&s=${sOffset}&dc=${sOffset}&v=l&o=json&api=/d.js&kl=wt-wt`;
+
+  try {
+    const res = await axios.post(
+      'https://html.duckduckgo.com/html/',
+      new URLSearchParams({ q: query.trim(), s: sOffset.toString(), b: '' }).toString(),
+      {
+        httpsAgent,
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Origin': 'https://html.duckduckgo.com',
+          'Referer': 'https://html.duckduckgo.com/',
+        },
+        timeout: 9000,
+      }
+    );
+
+    const $ = cheerio.load(res.data);
+    const results = [];
+    const seenUrls = new Set();
+
+    $('.result').each((_, el) => {
+      try {
+        const linkEl = $(el).find('a.result__url, a.result__title').first();
+        let rawUrl = $(el).find('a.result__snippet').attr('href') || linkEl.attr('href');
+        const title = $(el).find('a.result__title').text().trim();
+        const snippet = $(el).find('.result__snippet').text().trim();
+
+        if (!rawUrl || !title) return;
+
+        if (rawUrl.includes('uddg=')) {
+          const match = rawUrl.match(/uddg=([^&]+)/);
+          if (match && match[1]) {
+            rawUrl = decodeURIComponent(match[1]);
+          }
+        }
+
+        if (!rawUrl.startsWith('http') || rawUrl.includes('duckduckgo.com') || seenUrls.has(rawUrl)) return;
+        seenUrls.add(rawUrl);
+
+        let domain = 'web';
+        try {
+          domain = new URL(rawUrl).hostname.replace(/^www\./, '');
+        } catch {}
+
+        results.push({
+          title,
+          url: rawUrl,
+          domain,
+          snippet,
+          engine: 'duckduckgo',
+        });
+      } catch {}
+    });
+
+    if (results.length > 0) return results;
+  } catch (err) {
+    console.warn('Lỗi cào DuckDuckGo HTML:', err.message);
+  }
+
+  // Nếu cào HTTP bị chặn mới dùng đến Puppeteer
+  return await fetchDuckDuckGoWeb(query, page);
+}
+
 // ====================== YANDEX WEB ======================
 async function fetchYandexWeb(query, page = 1) {
   const p = Math.max(0, page - 1);
   const cleanQuery = encodeURIComponent(query.trim());
   const targetUrl = `https://yandex.com/search/?text=${cleanQuery}&p=${p}&lr=87&nomisspell=1`;
 
-  let html = '';
   try {
     const res = await axios.get(targetUrl, {
       httpsAgent,
       headers: {
         'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
         'Cookie': `yandexuid=${Math.floor(Math.random() * 1e18)}; is_gdpr=0; is_gdpr_b=0;`,
@@ -133,80 +204,62 @@ async function fetchYandexWeb(query, page = 1) {
       },
       timeout: 10000,
     });
-    html = res.data;
-  } catch (errDirect) {
-    try {
-      const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`;
-      const proxyRes = await axios.get(proxyUrl, { timeout: 12000 });
-      html = proxyRes.data;
-    } catch {
-      return [];
+
+    const html = res.data;
+    if (!html || typeof html !== 'string' || html.includes('CheckboxCaptcha')) {
+      return await fetchDuckDuckGoLiteDirect(query, page);
     }
-  }
 
-  if (!html || typeof html !== 'string') return [];
+    const $ = cheerio.load(html);
+    const results = [];
+    const seenUrls = new Set();
 
-  if (html.includes('CheckboxCaptcha') || html.includes('smart-captcha') || html.includes('robot')) {
-    console.warn('Yandex phát hiện CAPTCHA, kích hoạt fallback sang Bing.');
-    return await fetchBingWeb(query, page);
-  }
-
-  const $ = cheerio.load(html);
-  const results = [];
-  const seenUrls = new Set();
-
-  $('li.serp-item, div.serp-item, .Organic').each((_, el) => {
-    try {
-      const linkEl = $(el).find('h2 a, a.OrganicTitle-Link, a.Link_theme_outer, a[target="_blank"]').first();
-      let rawUrl = linkEl.attr('href');
-      let title = linkEl.text().trim();
-
-      if (!rawUrl || !title) return;
-      if (rawUrl.startsWith('//')) rawUrl = 'https:' + rawUrl;
-      if (!rawUrl.startsWith('http') || rawUrl.includes('yandex.')) return;
-
-      if (seenUrls.has(rawUrl)) return;
-      seenUrls.add(rawUrl);
-
-      let domain = 'web';
+    $('li.serp-item, div.serp-item, .Organic').each((_, el) => {
       try {
-        domain = new URL(rawUrl).hostname.replace(/^www\./, '');
+        const linkEl = $(el).find('h2 a, a.OrganicTitle-Link, a.Link_theme_outer, a[target="_blank"]').first();
+        let rawUrl = linkEl.attr('href');
+        let title = linkEl.text().trim();
+
+        if (!rawUrl || !title) return;
+        if (rawUrl.startsWith('//')) rawUrl = 'https:' + rawUrl;
+        if (!rawUrl.startsWith('http') || rawUrl.includes('yandex.')) return;
+
+        if (seenUrls.has(rawUrl)) return;
+        seenUrls.add(rawUrl);
+
+        let domain = 'web';
+        try {
+          domain = new URL(rawUrl).hostname.replace(/^www\./, '');
+        } catch {}
+
+        const snippet = $(el).find('.OrganicTextContentSpan, .organic__text, .text-container').first().text().trim() || '';
+
+        results.push({
+          title,
+          url: rawUrl,
+          domain,
+          snippet,
+          engine: 'yandex',
+        });
       } catch {}
+    });
 
-      const snippet =
-        $(el).find('.OrganicTextContentSpan, .organic__text, .ExtendedText-Full, .Organic-Content, .text-container').first().text().trim() ||$(el).find('div[class*="text"], span[class*="text"]').first().text().trim() ||
-        '';
-
-      results.push({
-        title,
-        url: rawUrl,
-        domain,
-        snippet,
-        engine: 'yandex',
-      });
-    } catch {}
-  });
-
-  if (results.length === 0) {
-    return await fetchBingWeb(query, page);
+    return results.length > 0 ? results : await fetchDuckDuckGoLiteDirect(query, page);
+  } catch {
+    return await fetchDuckDuckGoLiteDirect(query, page);
   }
+}
 
-  return results;
-}// Bộ nhớ đệm lưu link trang tiếp theo do Bing tự tạo ra
-const nextPageCache = new Map();
-
-// ====================== NGUỒN 3: PUPPETEER DUCKDUCKGO LITE (KHÔNG LỌC, PHÂN TRANG CHUẨN) ======================
+// ====================== PUPPETEER DDG LITE ======================
 export async function fetchDuckDuckGoWeb(query, page = 1) {
   const cleanQuery = query.trim();
   const pageIndex = Math.max(1, page);
-  // DDG Lite phân trang theo số lượng bài: trang 1 -> 0, trang 2 -> 30, trang 3 -> 60...
   const sOffset = (pageIndex - 1) * 30;
 
   const browser = await getBrowser();
   const browserPage = await browser.newPage();
 
   try {
-    // Chỉ chặn ảnh và font để tăng tốc, giữ lại HTML/Script cơ bản
     await browserPage.setRequestInterception(true);
     browserPage.on('request', (req) => {
       const type = req.resourceType();
@@ -218,15 +271,12 @@ export async function fetchDuckDuckGoWeb(query, page = 1) {
     });
 
     await browserPage.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
     );
 
-    // URL DDG Lite kèm kp=-1 (Tắt hoàn toàn SafeSearch, hiển thị tất cả các chủ đề)
     const targetUrl = `https://lite.duckduckgo.com/lite/`;
-
     await browserPage.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
 
-    // Điền form tìm kiếm trực tiếp trên giao diện để tránh bot-check
     await browserPage.evaluate((q, s) => {
       const form = document.querySelector('form');
       if (form) {
@@ -235,7 +285,6 @@ export async function fetchDuckDuckGoWeb(query, page = 1) {
         inputQ.value = q;
         form.appendChild(inputQ);
 
-        // kp = -1: SafeSearch Off
         const inputKp = document.createElement('input');
         inputKp.name = 'kp';
         inputKp.value = '-1';
@@ -252,10 +301,8 @@ export async function fetchDuckDuckGoWeb(query, page = 1) {
       }
     }, cleanQuery, sOffset);
 
-    // Đợi trang kết quả load xong bảng dữ liệu
     await browserPage.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 12000 }).catch(() => null);
 
-    // Trích xuất dữ liệu kết quả từ các hàng trong bảng DDG Lite
     const results = await browserPage.evaluate(() => {
       const items = [];
       const seen = new Set();
@@ -267,7 +314,6 @@ export async function fetchDuckDuckGoWeb(query, page = 1) {
 
         if (!title || !rawUrl) return;
 
-        // Giải mã link redirect qua uddg nếu có
         if (rawUrl.includes('uddg=')) {
           const match = rawUrl.match(/uddg=([^&]+)/);
           if (match && match[1]) {
@@ -285,7 +331,6 @@ export async function fetchDuckDuckGoWeb(query, page = 1) {
           domain = new URL(rawUrl).hostname.replace(/^www\./, '');
         } catch {}
 
-        // Đoạn mô tả snippet nằm ở dòng kế tiếp trong bảng
         let snippet = '';
         const trParent = linkEl.closest('tr');
         if (trParent && trParent.nextElementSibling) {

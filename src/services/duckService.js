@@ -9,8 +9,8 @@ const httpsAgent = new https.Agent({
 
 export async function fetchDuckImages(query, page = 1, options = {}) {
   const {
-    engine = 'bing',          // 'bing' | 'yandex'
-    safeSearch = 'off',       // 'off' | 'moderate' | 'strict'
+    engine = 'bing',
+    safeSearch = 'off',
     count = 35,
   } = options;
 
@@ -18,7 +18,15 @@ export async function fetchDuckImages(query, page = 1, options = {}) {
     return await fetchYandexImages(query, page, { safeSearch, count });
   }
 
-  return await fetchBingImages(query, page, { safeSearch, count });
+  // Thử Bing trước
+  const bingResults = await fetchBingImages(query, page, { safeSearch, count });
+  if (bingResults && bingResults.length > 0) {
+    return bingResults;
+  }
+
+  // Nếu Bing trên Render bị chặn rỗng, tự động nhảy sang Yandex Images
+  console.log(`[Fallback Ảnh] Bing rỗng, chuyển sang Yandex Images cho: ${query}`);
+  return await fetchYandexImages(query, page, { safeSearch, count });
 }
 
 // ====================== BING ======================
@@ -27,7 +35,6 @@ async function fetchBingImages(query, page = 1, options = {}) {
   const first = (Math.max(1, page) - 1) * count + 1;
   const cleanQuery = encodeURIComponent(query.trim());
 
-  // Đã bỏ tsc=ImageHoverTitle để tránh mất metadata JSON
   let targetUrl = `https://www.bing.com/images/async?q=${cleanQuery}&first=${first}&count=${count}&mmasync=1&setlang=en`;
 
   if (safeSearch === 'off') {
@@ -39,25 +46,21 @@ async function fetchBingImages(query, page = 1, options = {}) {
     const res = await axios.get(targetUrl, {
       httpsAgent,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
-        'Cookie': 'SRCHHPGUSR=ADLT=OFF; _EDGE_S=mkt=en-US&ui=en-US&F=1',
-        'Referer': 'https://www.bing.com/',
-        'X-Requested-With': 'XMLHttpRequest',
+        'Cookie': 'SRCHHPGUSR=ADLT=OFF; _EDGE_S=mkt=en-US&ui=en-US&F=1; MUID=3B863C2E5D1E6F342D7D28455CA66E5B;',
+        'Referer': 'https://www.bing.com/images/search?q=' + cleanQuery,
+        'Sec-Ch-Ua': '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
+        'Sec-Ch-Ua-Mobile': '?0',
+        'Sec-Ch-Ua-Platform': '"Windows"',
       },
-      timeout: 12000,
+      timeout: 10000,
     });
     html = res.data;
   } catch (err) {
-    try {
-      const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`;
-      const proxyRes = await axios.get(proxyUrl, { timeout: 15000 });
-      html = proxyRes.data;
-    } catch {
-      console.error('Bing error:', err.message);
-      return [];
-    }
+    return [];
   }
 
   if (!html || typeof html !== 'string') return [];
