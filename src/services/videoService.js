@@ -66,35 +66,37 @@ function decodeBingRedirectUrl(rawHref = '') {
 }
 
 export async function fetchVideos(query, page = 1, options = {}) {
-  const { engine = 'bing', safeSearch = 'off', count = 20 } = options;
+  const { engine = 'bing', count = 20 } = options;
   console.log(`[Video Service] Bắt đầu tìm: "${query}" - Trang: ${page} - Engine: ${engine}`);
 
-  // Thử qua Bing Video Async trước
-  const bingResults = await fetchBingVideosAsync(query, page, { safeSearch, count });
+  if (engine === 'yandex') {
+    const yandexRes = await fetchYandexVideos(query, page, { count });
+    if (yandexRes && yandexRes.length > 0) {
+      console.log(`[Video Service] Yandex Video tìm thấy: ${yandexRes.length} video`);
+      return yandexRes;
+    }
+  }
+
+  // Mặc định hoặc fallback sang Bing Video Main
+  const bingResults = await fetchBingVideosMain(query, page, { count });
   if (bingResults && bingResults.length > 0) {
     console.log(`[Video Service] Bing Video tìm thấy: ${bingResults.length} video`);
     return bingResults;
   }
 
-  // Nếu Bing rỗng thì thử DuckDuckGo
-  console.log(`[Video Service] Bing Video rỗng, thử DuckDuckGo...`);
-  const ddgResults = await fetchDuckDuckGoVideos(query, page, { safeSearch, count });
-  if (ddgResults && ddgResults.length > 0) {
-    console.log(`[Video Service] DDG tìm thấy: ${ddgResults.length} video`);
-    return ddgResults;
-  }
-
-  return [];
+  // Nếu cả 2 đều rỗng, thử phương án quét mở rộng qua Bing Web Video
+  console.log(`[Video Service] Chuyển hướng quét Web Video...`);
+  return await fetchBingWebVideosFallback(query, page, { count });
 }
 
-// ====================== BING VIDEOS ASYNC (CHUẨN XÁC NHẤT) ======================
-async function fetchBingVideosAsync(query, page = 1, options = {}) {
-  const { count = 25 } = options;
+// ====================== BING VIDEOS (ENDPOINT CHÍNH THỨC) ======================
+async function fetchBingVideosMain(query, page = 1, options = {}) {
+  const { count = 20 } = options;
   const cleanQuery = encodeURIComponent(query.trim());
   const first = (Math.max(1, page) - 1) * count + 1;
 
-  // Endpoint async trả trực tiếp HTML các thẻ video card đã render
-  const targetUrl = `https://www.bing.com/videos/async?q=${cleanQuery}&first=${first}&count=${count}&mmasync=1&adlt=off&setlang=en`;
+  // Sử dụng endpoint chuẩn có tham số form và adlt=off
+  const targetUrl = `https://www.bing.com/videos/search?q=${cleanQuery}&first=${first}&count=${count}&adlt=off&qft=+filterui:duration-all&form=HDRSC3`;
 
   try {
     const res = await axios.get(targetUrl, {
@@ -102,9 +104,9 @@ async function fetchBingVideosAsync(query, page = 1, options = {}) {
       headers: {
         ...BROWSER_HEADERS,
         'Cookie': 'SRCHHPGUSR=ADLT=OFF&NRSLT=-1; _EDGE_S=mkt=en-US&ui=en-US&F=1; MUIDB=1;',
-        'Referer': `https://www.bing.com/videos/search?q=${cleanQuery}`,
+        'Referer': 'https://www.bing.com/',
       },
-      timeout: 10000,
+      timeout: 9000,
     });
 
     const html = res.data;
@@ -114,14 +116,13 @@ async function fetchBingVideosAsync(query, page = 1, options = {}) {
     const results = [];
     const seenUrls = new Set();
 
-    // Bing async trả về các thẻ .inline_video_card hoặc .mc_vtvc hoặc a.vrhdata
-    $('.inline_video_card, .mc_vtvc, div.dg_u, a.vrhdata').each((_, el) => {
+    // Bóc tách cả card dạng desktop lẫn mobile
+    $('.mc_vtvc, .inline_video_card, div.dg_u, [data-vrm]').each((_, el) => {
       try {
         const card = $(el);
-        const linkEl = card.is('a') ? card : card.find('a[href*="/videos/search"], a.vturl, a').first();
-        const rawHref = linkEl.attr('href') || '';
+        const linkEl = card.find('a[href*="/videos/search"], a.vturl, a').first();
+        const rawHref = linkEl.attr('href') || card.attr('href') || '';
 
-        // Đọc metadata JSON
         const rawMeta =
           card.attr('vrhm') ||
           card.attr('data-vrm') ||
@@ -210,87 +211,114 @@ async function fetchBingVideosAsync(query, page = 1, options = {}) {
 
     return results;
   } catch (err) {
-    console.warn(`[Bing Video Async Error]:`, err.message);
+    console.warn(`[Bing Video Main Error]:`, err.message);
     return [];
   }
 }
 
-// ====================== DUCKDUCKGO VIDEOS ======================
-async function fetchDuckDuckGoVideos(query, page = 1, options = {}) {
+// ====================== YANDEX VIDEO ======================
+async function fetchYandexVideos(query, page = 1, options = {}) {
   const { count = 20 } = options;
   const cleanQuery = encodeURIComponent(query.trim());
+  const p = Math.max(0, page - 1);
+
+  const targetUrl = `https://yandex.com/video/search?text=${cleanQuery}&p=${p}&family=0`;
 
   try {
-    let vqd = null;
-    try {
-      const pageRes = await axios.get(
-        `https://duckduckgo.com/?q=${cleanQuery}&t=h_&ia=videos&kp=-2&p=-2`,
-        {
-          httpsAgent,
-          headers: {
-            ...BROWSER_HEADERS,
-            'Cookie': 'p=-2; kp=-2;',
-          },
-          timeout: 4000,
-        }
-      );
-
-      const match =
-        pageRes.data.match(/vqd=['"]([^'"]+)['"]/) ||
-        pageRes.data.match(/vqd=([\d-]+)/);
-
-      if (match && match[1]) {
-        vqd = match[1];
-      }
-    } catch {}
-
-    if (!vqd) return [];
-
-    const offset = (Math.max(1, page) - 1) * count;
-    const apiUrl = `https://duckduckgo.com/v.js?l=us-en&o=json&q=${cleanQuery}&vqd=${vqd}&f=,,,duration:&p=-2&kp=-2&s=${offset}`;
-
-    const apiRes = await axios.get(apiUrl, {
+    const res = await axios.get(targetUrl, {
       httpsAgent,
       headers: {
         ...BROWSER_HEADERS,
-        'Cookie': 'p=-2; kp=-2;',
-        'Referer': 'https://duckduckgo.com/',
+        'Cookie': `yp=1750000000.sp.family:0; yandexuid=${Math.floor(Math.random() * 1e18)};`,
+        'Referer': 'https://yandex.com/',
       },
-      timeout: 6000,
+      timeout: 10000,
     });
 
-    const items = apiRes.data?.results || [];
+    const html = res.data;
+    if (!html || typeof html !== 'string') return [];
+
+    const $ = cheerio.load(html);
     const results = [];
-    const seen = new Set();
+    const seenUrls = new Set();
 
-    items.forEach((item) => {
-      let videoUrl = item.content || item.embed_url || item.uploader_url;
-      const publisher = item.publisher || item.provider || 'Web Video';
+    $('.thumb-image__image, [data-bem*="serp-item"]').each((_, el) => {
+      try {
+        const itemEl = $(el).closest('[data-bem]');
+        const dataBem = itemEl.attr('data-bem');
+        if (!dataBem) return;
 
-      if (
-        !videoUrl ||
-        videoUrl.includes('duckduckgo.com') ||
-        seen.has(videoUrl) ||
-        isBlacklisted(videoUrl, publisher)
-      ) {
-        return;
-      }
+        const parsed = JSON.parse(dataBem);
+        const videoData = parsed['serp-item'] || parsed;
+        const externalUrl = videoData.url || videoData.link;
 
-      seen.add(videoUrl);
+        if (!externalUrl || seenUrls.has(externalUrl) || isBlacklisted(externalUrl)) return;
+        seenUrls.add(externalUrl);
 
-      results.push({
-        title: item.title || query,
-        videoUrl,
-        thumbnailUrl: item.images?.large || item.images?.medium || item.images?.small || '',
-        duration: item.duration || '',
-        publisher,
-        views: item.views ? `${item.views} views` : '',
-        engine: 'duckduckgo',
-      });
+        results.push({
+          title: videoData.title || query,
+          videoUrl: externalUrl,
+          thumbnailUrl: videoData.thumb || videoData.thumbnail || '',
+          duration: videoData.duration || '',
+          publisher: videoData.provider || 'Yandex Video',
+          views: '',
+          engine: 'yandex',
+        });
+      } catch {}
     });
 
     return results.slice(0, count);
   } catch (err) {
+    console.warn(`[Yandex Video Error]:`, err.message);
+    return [];
+  }
+}
+
+// ====================== PHƯƠNG ÁN QUÉT MỞ RỘNG (FALLBACK) ======================
+async function fetchBingWebVideosFallback(query, page = 1, options = {}) {
+  const { count = 20 } = options;
+  const cleanQuery = encodeURIComponent(`${query.trim()} video`);
+  const first = (Math.max(1, page) - 1) * count + 1;
+  const targetUrl = `https://www.bing.com/search?q=${cleanQuery}&first=${first}&adlt=off`;
+
+  try {
+    const res = await axios.get(targetUrl, {
+      httpsAgent,
+      headers: BROWSER_HEADERS,
+      timeout: 8000,
+    });
+
+    const $ = cheerio.load(res.data);
+    const results = [];
+    const seenUrls = new Set();
+
+    $('li.b_algo').each((_, el) => {
+      try {
+        const titleEl = $(el).find('h2 a').first();
+        const url = titleEl.attr('href');
+        const title = titleEl.text().trim();
+        if (!url || !url.startsWith('http') || seenUrls.has(url) || isBlacklisted(url)) return;
+
+        seenUrls.add(url);
+        let domain = 'Web Video';
+        try {
+          domain = new URL(url).hostname.replace(/^www\./, '');
+        } catch {}
+
+        results.push({
+          title,
+          videoUrl: url,
+          thumbnailUrl: '',
+          duration: '',
+          publisher: domain,
+          views: '',
+          engine: 'bing',
+        });
+      } catch {}
+    });
+
+    return results.slice(0, count);
+  } catch {
     return [];
   }
 }
