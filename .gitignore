@@ -1,0 +1,35 @@
+# Dependencies (Bắt buộc bỏ qua để Render tự npm install)
+node_modules/
+.pnp
+.pnp.js
+
+# Môi trường và biến bí mật (Không đẩy lên GitHub tránh lộ key/secret)
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Nhật ký và debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+backend.log
+
+# Puppeteer cache / Chromium profile tải về
+.local-chromium/
+.cache/puppeteer/
+puppeteer-data/
+
+# OS / Editor temporary files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.suo
+*.ntvs
+*.njsproj
+*.sln
+*.sw?
