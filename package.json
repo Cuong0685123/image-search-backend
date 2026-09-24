@@ -4,7 +4,7 @@
   "description": "",
   "main": "src/server.js",
   "scripts": {
-    "dev": "nodemon src/server.js",
+    "build": "puppeteer browsers install chrome",
     "start": "node src/server.js"
   },
   "keywords": [],

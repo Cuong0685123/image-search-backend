@@ -7,7 +7,6 @@ const httpsAgent = new https.Agent({
   rejectUnauthorized: false,
 });
 
-// Giả lập đầy đủ Header của Chrome thật để tránh bị server đích ngâm kết nối
 const BROWSER_HEADERS = {
   'User-Agent':
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
@@ -26,7 +25,7 @@ const BROWSER_HEADERS = {
 export async function extractAllVideosFromUrl(targetUrl) {
   if (!targetUrl) return [];
 
-  // Nếu bản thân link đã là file stream .mp4/.m3u8 thì trả về luôn, không cần cào
+  // Nếu bản thân link đã là file stream .mp4/.m3u8/.webm
   if (/\.(mp4|webm|m3u8|ogg)($|\?)/i.test(targetUrl)) {
     try {
       const hostname = new URL(targetUrl).hostname;
@@ -48,7 +47,7 @@ export async function extractAllVideosFromUrl(targetUrl) {
         'Referer': targetUrl,
       },
       httpsAgent,
-      timeout: 18000, // Tăng lên 18s để các trang tải chậm không bị timeout
+      timeout: 15000,
       maxRedirects: 5,
     });
 
@@ -100,10 +99,14 @@ export async function extractAllVideosFromUrl(targetUrl) {
       }
     });
 
-    // 3. Regex quét tìm các URL đuôi .mp4 / .m3u8 nhúng trong script
-    const matches = html.match(/https?:\\?\/\\?\/[^"'\s<>]+?\.(?:mp4|m3u8)[^"'\s<>]*/gi) || [];
+    // 3. Regex quét tìm các URL đuôi .mp4 / .m3u8 nhúng trong script & JSON
+    const matches = html.match(/https?:\\?\/\\?\/[^"'\s<>]+?\.(?:mp4|m3u8|webm)[^"'\s<>]*/gi) || [];
     for (let rawUrl of matches) {
-      const cleanUrl = rawUrl.replace(/\\\//g, '/');
+      let cleanUrl = rawUrl.replace(/\\\//g, '/');
+      try {
+        cleanUrl = decodeURIComponent(cleanUrl);
+      } catch {}
+
       if (!seenUrls.has(cleanUrl) && !cleanUrl.includes('placeholder')) {
         seenUrls.add(cleanUrl);
         results.push({
@@ -115,7 +118,7 @@ export async function extractAllVideosFromUrl(targetUrl) {
       }
     }
 
-    // 4. Nếu không có file mp4/m3u8, quét các iframe nhúng trình phát
+    // 4. Nếu chưa có kết quả, quét iframe nhúng
     if (results.length === 0) {
       $('iframe[src]').each((_, el) => {
         let src = $(el).attr('src');
@@ -140,7 +143,6 @@ export async function extractAllVideosFromUrl(targetUrl) {
   }
 }
 
-// Giữ lại hàm bóc tách đơn lẻ cho modal popup
 export async function extractDirectVideo(targetUrl) {
   const videos = await extractAllVideosFromUrl(targetUrl);
   return videos.length > 0 ? (videos[0].streamUrl || null) : null;

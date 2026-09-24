@@ -44,7 +44,7 @@ function isBlacklisted(url = '', publisher = '') {
   );
 }
 
-// Giải mã tham số redirect ru= hoặc rurl=
+// Giải mã tham số redirect ru= hoặc rurl= của Bing
 function decodeBingRedirectUrl(rawHref = '') {
   if (!rawHref) return null;
   const match = rawHref.match(/[?&](?:ru|rurl)=([^&]+)/i);
@@ -70,7 +70,7 @@ function decodeBingRedirectUrl(rawHref = '') {
 export async function fetchVideos(query, page = 1, options = {}) {
   const { engine = 'bing', safeSearch = 'off', count = 20 } = options;
 
-  if (engine === 'yandex') {
+  if (engine === 'yandex' || engine === 'duckduckgo') {
     const ddgResults = await fetchDuckDuckGoVideos(query, page, { safeSearch, count });
     if (ddgResults && ddgResults.length >= 5) return ddgResults;
     return await fetchBingVideos(query, page, { safeSearch, count });
@@ -89,11 +89,9 @@ async function fetchBingVideos(query, page = 1, options = {}) {
   let aggregatedResults = [];
   const seenUrls = new Set();
 
-  const maxBatches = 3;
+  const maxBatches = 2;
   const batchSize = 30;
-
-  // Tính bước nhảy tịnh tiến vừa phải, không làm cạn kiệt SERP của Bing
-  const pageBaseFirst = (Math.max(1, page) - 1) * 30 + 1;
+  const pageBaseFirst = (Math.max(1, page) - 1) * count + 1;
 
   for (let b = 0; b < maxBatches; b++) {
     const currentFirst = pageBaseFirst + b * batchSize;
@@ -114,7 +112,6 @@ async function fetchBingVideos(query, page = 1, options = {}) {
         const batchVideos = parseBingHtml(res.data, query, seenUrls);
         aggregatedResults.push(...batchVideos);
 
-        // Gom đủ số lượng thì dừng sớm để tối ưu tốc độ phản hồi
         if (aggregatedResults.length >= count) {
           break;
         }
@@ -138,7 +135,6 @@ function parseBingHtml(html, query, seenUrls = new Set()) {
       const linkEl = card.find('a[href*="/videos/search"], a.vturl, a').first();
       const rawHref = linkEl.attr('href') || '';
 
-      // 1. Quét sâu chuỗi metadata JSON từ nhiều thuộc tính
       const rawMeta =
         card.attr('vrhm') ||
         card.attr('data-vrm') ||
@@ -159,7 +155,6 @@ function parseBingHtml(html, query, seenUrls = new Set()) {
         }
       }
 
-      // 2. Tìm link website ngoài (loại trừ hoàn toàn bing.com)
       let externalUrl = null;
       if (meta?.purl && !meta.purl.includes('bing.com')) {
         externalUrl = meta.purl;
@@ -171,12 +166,10 @@ function parseBingHtml(html, query, seenUrls = new Set()) {
         externalUrl = meta.mediaurl;
       }
 
-      // Giải mã tham số ru= / rurl= nếu JSON không chứa link ngoài
       if (!externalUrl) {
         externalUrl = decodeBingRedirectUrl(rawHref);
       }
 
-      // Bỏ qua nếu vẫn là link nội bộ bing.com hoặc không trích xuất được URL ngoài
       if (!externalUrl || externalUrl.includes('bing.com') || externalUrl.startsWith('/')) {
         return;
       }
@@ -187,7 +180,6 @@ function parseBingHtml(html, query, seenUrls = new Set()) {
         meta?.source ||
         'Web Video';
 
-      // 3. Lọc bỏ các nền tảng trong blacklist
       if (seenUrls.has(externalUrl) || isBlacklisted(externalUrl, publisher)) {
         return;
       }
@@ -264,6 +256,19 @@ async function fetchDuckDuckGoVideos(query, page = 1, options = {}) {
       }
     } catch {}
 
+    if (!vqd) {
+      // Fallback lấy vqd trực tiếp nếu request đầu không khớp
+      try {
+        const vqdRes = await axios.get(`https://duckduckgo.com/?q=${cleanQuery}`, {
+          httpsAgent,
+          headers: BROWSER_HEADERS,
+          timeout: 4000,
+        });
+        const vqdMatch = vqdRes.data.match(/vqd=([\d-]+)/);
+        if (vqdMatch && vqdMatch[1]) vqd = vqdMatch[1];
+      } catch {}
+    }
+
     if (!vqd) return [];
 
     const offset = (Math.max(1, page) - 1) * count;
@@ -305,7 +310,7 @@ async function fetchDuckDuckGoVideos(query, page = 1, options = {}) {
         duration: item.duration || '',
         publisher,
         views: item.views ? `${item.views} views` : '',
-        engine: 'yandex',
+        engine: 'duckduckgo',
       });
     });
 
