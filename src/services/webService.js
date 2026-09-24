@@ -1,6 +1,5 @@
 import axios from 'axios';
 import https from 'https';
-import * as cheerio from 'cheerio';
 
 const httpsAgent = new https.Agent({
   keepAlive: true,
@@ -8,161 +7,123 @@ const httpsAgent = new https.Agent({
 });
 
 const BROWSER_HEADERS = {
-  'User-Agent':
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-  'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7',
+  'User-Agent': 'OmniSearchApp/1.0 (contact: student@iuh.edu.vn)',
+  'Accept': 'application/json',
 };
 
 export async function fetchWebResults(query, page = 1, options = {}) {
-  const { engine = 'bing' } = options;
-  console.log(`[Web Service] Tìm kiếm bài viết: "${query}" - Trang: ${page} - Engine: ${engine}`);
+  const { engine = 'bing', count = 10 } = options;
+  console.log(`[Tri Thức Service] Tìm kiếm: "${query}" - Trang: ${page} - Engine: ${engine}`);
 
-  // Nguồn 2: Ưu tiên Yahoo Web Search
-  if (engine === 'yandex' || engine === 'yahoo') {
-    const yahooResults = await fetchYahooWeb(query, page);
-    if (yahooResults && yahooResults.length > 0) {
-      console.log(`[Web Service] Yahoo tìm thấy: ${yahooResults.length} bài viết (Trang ${page})`);
-      return yahooResults;
+  // Nguồn 2: Tra cứu khái niệm nhanh (DuckDuckGo Instant Answer)
+  if (engine === 'yandex' || engine === 'yahoo' || engine === 'duckduckgo') {
+    const instantResults = await fetchDuckDuckGoInstant(query);
+    if (instantResults && instantResults.length > 0) {
+      console.log(`[Tri Thức Service] DDG Instant tìm thấy: ${instantResults.length} mục`);
+      return instantResults;
     }
   }
 
-  // Nguồn 1 (Mặc định): Bing Web qua RSS Feed (Cực nhanh, không bao giờ timeout trên Render)
-  const bingResults = await fetchBingRSSWeb(query, page);
-  if (bingResults && bingResults.length > 0) {
-    console.log(`[Web Service] Bing RSS tìm thấy: ${bingResults.length} bài viết (Trang ${page})`);
-    return bingResults;
+  // Nguồn 1 (Mặc định): Wikipedia Tiếng Việt Open API (Hỗ trợ phân trang vô hạn)
+  const wikiResults = await fetchWikipediaVN(query, page, count);
+  if (wikiResults && wikiResults.length > 0) {
+    console.log(`[Tri Thức Service] Wikipedia tìm thấy: ${wikiResults.length} bài viết (Trang ${page})`);
+    return wikiResults;
   }
 
-  // Fallback: Yahoo Web
-  const fallbackYahoo = await fetchYahooWeb(query, page);
-  if (fallbackYahoo && fallbackYahoo.length > 0) {
-    console.log(`[Web Service] Fallback Yahoo tìm thấy: ${fallbackYahoo.length} bài viết`);
-    return fallbackYahoo;
-  }
-
-  return [];
+  // Fallback sang DuckDuckGo Instant nếu Wikipedia rỗng
+  return await fetchDuckDuckGoInstant(query);
 }
 
-// ====================== NGUỒN 1: BING WEB RSS (CHỐNG TIMEOUT & CHẶN BOT) ======================
-async function fetchBingRSSWeb(query, page = 1) {
+// ====================== NGUỒN 1: WIKIPEDIA TIẾNG VIỆT API ======================
+async function fetchWikipediaVN(query, page = 1, count = 10) {
   const cleanQuery = encodeURIComponent(query.trim());
-  const first = (Math.max(1, page) - 1) * 10 + 1;
-  // Endpoint RSS của Bing chấp nhận tham số first và format=rss chuẩn
-  const targetUrl = `https://www.bing.com/search?q=${cleanQuery}&format=rss&first=${first}&setmkt=vi-VN&setlang=vi`;
+  const offset = (Math.max(1, page) - 1) * count;
+
+  // Endpoint chính thức của Wikipedia tiếng Việt, trả về JSON trực tiếp
+  const targetUrl = `https://vi.wikipedia.org/w/api.php?action=query&list=search&srsearch=${cleanQuery}&sroffset=${offset}&srlimit=${count}&format=json`;
 
   try {
     const res = await axios.get(targetUrl, {
       httpsAgent,
-      headers: {
-        ...BROWSER_HEADERS,
-        'Cookie': 'SRCHHPGUSR=ADLT=OFF&NRSLT=10; _EDGE_S=mkt=vi-VN&ui=vi-VN&F=1;',
-      },
-      timeout: 5000, // Timeout ngắn 5s để không bị treo
+      headers: BROWSER_HEADERS,
+      timeout: 6000,
     });
 
-    const xmlData = res.data;
-    if (!xmlData || typeof xmlData !== 'string') return [];
+    const searchItems = res.data?.query?.search || [];
+    if (!Array.isArray(searchItems) || searchItems.length === 0) return [];
 
-    const $ = cheerio.load(xmlData, { xmlMode: true });
-    const results = [];
-    const seenUrls = new Set();
+    return searchItems.map((item) => {
+      // Làm sạch các thẻ HTML <span> do Wikipedia highlight từ khóa
+      const cleanSnippet = (item.snippet || '')
+        .replace(/<[^>]*>?/gm, '')
+        .replace(/&quot;/g, '"')
+        .trim();
 
-    $('item').each((_, el) => {
-      try {
-        const title = $(el).find('title').first().text().trim();
-        const rawUrl = $(el).find('link').first().text().trim();
-        const snippet = $(el).find('description').first().text().trim();
+      const pageUrl = `https://vi.wikipedia.org/wiki/${encodeURIComponent(item.title.replace(/ /g, '_'))}`;
 
-        if (!title || !rawUrl || !rawUrl.startsWith('http')) return;
-        if (seenUrls.has(rawUrl)) return;
-        seenUrls.add(rawUrl);
-
-        let domain = 'web';
-        try {
-          domain = new URL(rawUrl).hostname.replace(/^www\./, '');
-        } catch {}
-
-        results.push({
-          title,
-          url: rawUrl,
-          domain,
-          snippet: snippet.replace(/<[^>]*>?/gm, '').trim(),
-          engine: 'bing',
-        });
-      } catch {}
+      return {
+        title: item.title,
+        url: pageUrl,
+        domain: 'vi.wikipedia.org',
+        snippet: cleanSnippet.endsWith('.') ? cleanSnippet : `${cleanSnippet}...`,
+        engine: 'wikipedia',
+      };
     });
-
-    return results;
   } catch (err) {
-    console.warn('[Bing RSS Warning]:', err.message);
+    console.warn('[Wikipedia API Warning]:', err.message);
     return [];
   }
 }
 
-// ====================== NGUỒN 2: YAHOO WEB (PHÂN TRANG OFFSET) ======================
-async function fetchYahooWeb(query, page = 1) {
+// ====================== NGUỒN 2: DUCKDUCKGO INSTANT ANSWER API ======================
+async function fetchDuckDuckGoInstant(query) {
   const cleanQuery = encodeURIComponent(query.trim());
-  const b = (Math.max(1, page) - 1) * 10 + 1;
-  const targetUrl = `https://search.yahoo.com/search?p=${cleanQuery}&b=${b}&nojs=1`;
+  const targetUrl = `https://api.duckduckgo.com/?q=${cleanQuery}&format=json&no_html=1&skip_disambig=0`;
 
   try {
     const res = await axios.get(targetUrl, {
       httpsAgent,
-      headers: {
-        ...BROWSER_HEADERS,
-        'Referer': 'https://search.yahoo.com/',
-      },
-      timeout: 6000,
+      headers: BROWSER_HEADERS,
+      timeout: 5000,
     });
 
-    const html = res.data;
-    if (!html || typeof html !== 'string') return [];
-
-    const $ = cheerio.load(html);
+    const data = res.data;
     const results = [];
-    const seenUrls = new Set();
 
-    $('.algo, .searchCenterMiddle li, #web li').each((_, el) => {
-      try {
-        const linkEl = $(el).find('h3 a, a.fz-m').first();
-        let rawUrl = linkEl.attr('href');
-        const title = linkEl.text().trim();
-        const snippet = $(el).find('.compText, .fz-ms, span.fc-2nd').first().text().trim();
+    // 1. Kết quả định nghĩa trừu tượng chính (Abstract)
+    if (data?.AbstractText && data?.AbstractURL) {
+      results.push({
+        title: data.Heading || query,
+        url: data.AbstractURL,
+        domain: data.AbstractSource || 'duckduckgo.com',
+        snippet: data.AbstractText,
+        engine: 'knowledge',
+      });
+    }
 
-        if (!rawUrl || !title) return;
-
-        // Bóc link thực từ redirect RU=
-        if (rawUrl.includes('/RU=')) {
-          const match = rawUrl.match(/\/RU=([^/]+)/);
-          if (match && match[1]) {
-            try {
-              rawUrl = decodeURIComponent(match[1]);
-            } catch {}
-          }
-        }
-
-        if (!rawUrl.startsWith('http') || rawUrl.includes('yahoo.com') || seenUrls.has(rawUrl)) return;
-        seenUrls.add(rawUrl);
-
-        let domain = 'web';
+    // 2. Các chủ đề liên quan (RelatedTopics)
+    const related = data?.RelatedTopics || [];
+    for (const item of related) {
+      if (item.Text && item.FirstURL) {
+        let domain = 'duckduckgo.com';
         try {
-          domain = new URL(rawUrl).hostname.replace(/^www\./, '');
+          domain = new URL(item.FirstURL).hostname.replace(/^www\./, '');
         } catch {}
 
         results.push({
-          title,
-          url: rawUrl,
+          title: item.Text.split(' - ')[0] || item.Text.slice(0, 50),
+          url: item.FirstURL,
           domain,
-          snippet,
-          engine: 'yahoo',
+          snippet: item.Text,
+          engine: 'knowledge',
         });
-      } catch {}
-    });
+      }
+    }
 
     return results;
   } catch (err) {
-    console.warn('[Yahoo Web Warning]:', err.message);
+    console.warn('[DDG Instant Warning]:', err.message);
     return [];
   }
 }
