@@ -18,45 +18,59 @@ const BROWSER_HEADERS = {
 };
 
 export async function fetchVideos(query, page = 1, options = {}) {
-  const { count = 20 } = options;
-  console.log(`[Video Service] Bắt đầu tìm: "${query}" - Trang: ${page}`);
+  const { engine = 'bing', count = 20 } = options;
+  console.log(`[Video Service] Bắt đầu tìm: "${query}" - Trang: ${page} - Engine: ${engine}`);
 
-  // 1. Thử Bing Video Scraper mở rộng (Hỗ trợ 18+, adlt=off)
-  const bingVideos = await fetchBingVideosUncensored(query, page, count);
-  if (bingVideos && bingVideos.length > 0) {
-    console.log(`[Video Service] Bing Video tìm thấy: ${bingVideos.length} video`);
-    return bingVideos;
+  // 1. Nếu người dùng chọn Nguồn 2 (Yandex): Ưu tiên Yandex Video Uncensored
+  if (engine === 'yandex') {
+    const yandexRes = await fetchYandexVideos(query, page, count);
+    if (yandexRes && yandexRes.length > 0) {
+      console.log(`[Video Service] Yandex Video tìm thấy: ${yandexRes.length} video`);
+      return yandexRes;
+    }
   }
 
-  // 2. Fallback sang Dailymotion API (Đã tắt Family Filter)
-  console.log(`[Video Service] Bing rỗng, chuyển sang Dailymotion Unfiltered...`);
-  const dmVideos = await fetchDailymotionUnfiltered(query, page, count);
-  if (dmVideos && dmVideos.length > 0) {
-    console.log(`[Video Service] Dailymotion tìm thấy: ${dmVideos.length} video`);
-    return dmVideos;
+  // 2. Nguồn 1 (Bing Video): Thử cào Bing Video với cookie tắt SafeSearch
+  const bingResults = await fetchBingVideos(query, page, count);
+  if (bingResults && bingResults.length > 0) {
+    console.log(`[Video Service] Bing Video tìm thấy: ${bingResults.length} video`);
+    return bingResults;
+  }
+
+  // 3. Fallback 1: Yandex Video (R18 cực mạnh không kiểm duyệt)
+  console.log(`[Video Service] Bing rỗng, chuyển sang quét Yandex Video...`);
+  const yandexFallback = await fetchYandexVideos(query, page, count);
+  if (yandexFallback && yandexFallback.length > 0) {
+    console.log(`[Video Service] Yandex Video Fallback tìm thấy: ${yandexFallback.length} video`);
+    return yandexFallback;
+  }
+
+  // 4. Fallback 2: Eporner API (Chuyên trị từ khoá 18+/R18/Sex/Gay, JSON cực nhanh không bao giờ lỗi)
+  console.log(`[Video Service] Chuyển hướng sang Eporner Open API...`);
+  const r18Results = await fetchEpornerVideos(query, page, count);
+  if (r18Results && r18Results.length > 0) {
+    console.log(`[Video Service] Eporner API tìm thấy: ${r18Results.length} video`);
+    return r18Results;
   }
 
   return [];
 }
 
-// ====================== NGUỒN 1: BING VIDEOS (TẮT BỘ LỌC KIỂM DUYỆT) ======================
-async function fetchBingVideosUncensored(query, page = 1, count = 20) {
+// ====================== NGUỒN 1: BING VIDEOS ======================
+async function fetchBingVideos(query, page = 1, count = 20) {
   const cleanQuery = encodeURIComponent(query.trim());
   const first = (Math.max(1, page) - 1) * count + 1;
-
-  // Sử dụng endpoint search chuẩn của Bing với cookie adlt=off để lấy mọi nội dung
-  const targetUrl = `https://www.bing.com/videos/search?q=${cleanQuery}&first=${first}&count=${count}&adlt=off&qft=+filterui:duration-all`;
+  const targetUrl = `https://www.bing.com/videos/search?q=${cleanQuery}&first=${first}&count=${count}&adlt=off&safesearch=off&qft=+filterui:duration-all&FORM=HDRSC3`;
 
   try {
     const res = await axios.get(targetUrl, {
       httpsAgent,
       headers: {
         ...BROWSER_HEADERS,
-        // Cặp Cookie quan trọng để tắt SafeSearch triệt để trên Bing
         'Cookie': 'SRCHHPGUSR=ADLT=OFF&NRSLT=-1; _EDGE_S=mkt=en-US&ui=en-US&F=1; MUIDB=1; SRCHD=AF=NOFORM;',
         'Referer': 'https://www.bing.com/',
       },
-      timeout: 10000,
+      timeout: 9000,
     });
 
     const html = res.data;
@@ -66,15 +80,13 @@ async function fetchBingVideosUncensored(query, page = 1, count = 20) {
     const results = [];
     const seenUrls = new Set();
 
-    // Quét thẻ card video của Bing
-    $('.mc_vtvc, div.videoCard, .inline_video_card').each((_, el) => {
+    $('.mc_vtvc, div.videoCard, .inline_video_card, div.dg_u').each((_, el) => {
       try {
         const card = $(el);
-        const linkEl = card.find('a.vturl, a[href*="/videos/search"]').first();
+        const linkEl = card.find('a.vturl, a[href*="/videos/search"], a').first();
         const rawHref = linkEl.attr('href') || '';
 
-        // Trích xuất metadata
-        const rawMeta = card.attr('vrhm') || card.find('[vrhm]').attr('vrhm');
+        const rawMeta = card.attr('vrhm') || card.find('[vrhm]').attr('vrhm') || card.attr('data-vrm');
         let meta = null;
         if (rawMeta) {
           try {
@@ -88,7 +100,6 @@ async function fetchBingVideosUncensored(query, page = 1, count = 20) {
 
         let videoUrl = meta?.purl || meta?.curl || meta?.mediaurl;
 
-        // Nếu không có trong JSON vrhm, bóc từ param ru= redirect
         if (!videoUrl && rawHref) {
           const match = rawHref.match(/[?&](?:ru|rurl)=([^&]+)/i);
           if (match && match[1]) {
@@ -98,24 +109,13 @@ async function fetchBingVideosUncensored(query, page = 1, count = 20) {
           }
         }
 
-        if (!videoUrl || videoUrl.includes('bing.com') || !videoUrl.startsWith('http')) {
-          return;
-        }
-
+        if (!videoUrl || videoUrl.includes('bing.com') || !videoUrl.startsWith('http')) return;
         if (seenUrls.has(videoUrl)) return;
         seenUrls.add(videoUrl);
 
-        const title =
-          card.find('.mc_vtvc_title, .b_tit').text().trim() ||
-          meta?.title ||
-          query;
-
+        const title = card.find('.mc_vtvc_title, .b_tit, .title').text().trim() || meta?.title || query;
         const imgEl = card.find('img').first();
-        let thumbnailUrl =
-          imgEl.attr('src') ||
-          imgEl.attr('data-src') ||
-          meta?.thumb?.url ||
-          '';
+        let thumbnailUrl = imgEl.attr('src') || imgEl.attr('data-src') || meta?.thumb?.url || '';
 
         if (thumbnailUrl.startsWith('//')) {
           thumbnailUrl = 'https:' + thumbnailUrl;
@@ -138,18 +138,98 @@ async function fetchBingVideosUncensored(query, page = 1, count = 20) {
 
     return results.slice(0, count);
   } catch (err) {
-    console.warn('[Bing Video Uncensored Error]:', err.message);
     return [];
   }
 }
 
-// ====================== NGUỒN 2: DAILYMOTION API (TẮT BỘ LỌC FAMILY) ======================
-async function fetchDailymotionUnfiltered(query, page = 1, count = 20) {
+// ====================== NGUỒN 2: YANDEX VIDEO (UNCENSORED family=0) ======================
+async function fetchYandexVideos(query, page = 1, count = 20) {
   const cleanQuery = encodeURIComponent(query.trim());
-  const limit = Math.min(count, 50);
+  const p = Math.max(0, page - 1);
+  const targetUrl = `https://yandex.com/video/search?text=${cleanQuery}&p=${p}&family=0`;
 
-  // family_filter=false là cờ cho phép trả về mọi nội dung
-  const targetUrl = `https://api.dailymotion.com/videos?search=${cleanQuery}&page=${page}&limit=${limit}&family_filter=false&fields=id,title,duration,thumbnail_360_url,thumbnail_480_url,url,views_total,owner.screenname`;
+  try {
+    const res = await axios.get(targetUrl, {
+      httpsAgent,
+      headers: {
+        ...BROWSER_HEADERS,
+        'Cookie': `yp=1750000000.sp.family:0; yandexuid=${Math.floor(Math.random() * 1e18)};`,
+        'Referer': 'https://yandex.com/',
+      },
+      timeout: 10000,
+    });
+
+    const html = res.data;
+    if (!html || typeof html !== 'string') return [];
+
+    const $ = cheerio.load(html);
+    const results = [];
+    const seenUrls = new Set();
+
+    // 1. Quét JSON state
+    const stateEl = $('[id^="VideoApp-"][data-state], [data-bem*="serp-list"]').first();
+    const rawState = stateEl.attr('data-state');
+
+    if (rawState) {
+      try {
+        const state = JSON.parse(rawState);
+        const items = state?.initialState?.serpList?.items?.entities || {};
+        for (const key of Object.keys(items)) {
+          const item = items[key];
+          const rawUrl = item?.url || item?.shareUrl;
+          if (!rawUrl || seenUrls.has(rawUrl)) continue;
+
+          seenUrls.add(rawUrl);
+          results.push({
+            title: item.title || item.alt || query,
+            videoUrl: rawUrl,
+            thumbnailUrl: item.thumb?.url || item.thumbnailUrl || '',
+            duration: item.duration || '',
+            publisher: item.host || 'Yandex Video',
+            views: item.views ? `${item.views} views` : '',
+            engine: 'yandex',
+          });
+        }
+      } catch {}
+    }
+
+    // 2. Quét data-bem item
+    if (results.length === 0) {
+      $('[data-bem*="serp-item"]').each((_, el) => {
+        try {
+          const bem = $(el).attr('data-bem');
+          if (!bem) return;
+          const parsed = JSON.parse(bem);
+          const data = parsed['serp-item'] || parsed;
+          const videoUrl = data.url || data.link;
+
+          if (!videoUrl || seenUrls.has(videoUrl)) return;
+          seenUrls.add(videoUrl);
+
+          results.push({
+            title: data.title || $(el).find('.thumb-image__image').attr('alt') || query,
+            videoUrl,
+            thumbnailUrl: data.thumb || $(el).find('img').attr('src') || '',
+            duration: data.duration || '',
+            publisher: data.provider || 'Web Video',
+            views: '',
+            engine: 'yandex',
+          });
+        } catch {}
+      });
+    }
+
+    return results.slice(0, count);
+  } catch (err) {
+    return [];
+  }
+}
+
+// ====================== NGUỒN 3: EPORNER OPEN API (R18 CHUYÊN BIỆT) ======================
+async function fetchEpornerVideos(query, page = 1, count = 20) {
+  const cleanQuery = encodeURIComponent(query.trim());
+  const perPage = Math.min(count, 30);
+  const targetUrl = `https://www.eporner.com/api/v2/web/search/?query=${cleanQuery}&per_page=${perPage}&page=${page}&thumbsize=medium&order=top-weekly&format=json`;
 
   try {
     const res = await axios.get(targetUrl, {
@@ -158,30 +238,23 @@ async function fetchDailymotionUnfiltered(query, page = 1, count = 20) {
         'User-Agent': BROWSER_HEADERS['User-Agent'],
         'Accept': 'application/json',
       },
-      timeout: 9000,
+      timeout: 8000,
     });
 
-    const list = res.data?.list || [];
-    if (!Array.isArray(list) || list.length === 0) return [];
+    const videos = res.data?.videos || [];
+    if (!Array.isArray(videos) || videos.length === 0) return [];
 
-    return list.map((item) => {
-      const totalSec = item.duration || 0;
-      const min = Math.floor(totalSec / 60);
-      const sec = totalSec % 60;
-      const durationStr = totalSec > 0 ? `${min}:${sec < 10 ? '0' : ''}${sec}` : '';
-
-      return {
-        title: item.title || query,
-        videoUrl: item.url || `https://www.dailymotion.com/video/${item.id}`,
-        thumbnailUrl: item.thumbnail_480_url || item.thumbnail_360_url || '',
-        duration: durationStr,
-        publisher: item['owner.screenname'] || 'DailyMotion',
-        views: item.views_total ? `${item.views_total.toLocaleString()} lượt xem` : '',
-        engine: 'dailymotion',
-      };
-    });
+    return videos.map((item) => ({
+      title: item.title || query,
+      videoUrl: item.url, // Link video gốc
+      thumbnailUrl: item.default_thumb?.src || item.thumbs?.[0]?.src || '',
+      duration: item.length_min || '',
+      publisher: 'Eporner Stream',
+      views: item.views ? `${item.views.toLocaleString()} views` : '',
+      engine: 'r18_stream',
+    }));
   } catch (err) {
-    console.warn(`[Dailymotion Unfiltered Error]:`, err.message);
+    console.warn(`[Eporner API Error]:`, err.message);
     return [];
   }
 }
