@@ -17,7 +17,6 @@ const BROWSER_HEADERS = {
   'Sec-Ch-Ua-Platform': '"Windows"',
 };
 
-// DANH SÁCH ĐEN CHỈ CHẶN MẠNG XÃ HỘI & NỀN TẢNG VIDEO ĐÓNG
 const BLACKLISTED_PLATFORMS = [
   'youtube.com',
   'youtu.be',
@@ -44,7 +43,6 @@ function isBlacklisted(url = '', publisher = '') {
   );
 }
 
-// Giải mã tham số redirect ru= hoặc rurl= của Bing
 function decodeBingRedirectUrl(rawHref = '') {
   if (!rawHref) return null;
   const match = rawHref.match(/[?&](?:ru|rurl)=([^&]+)/i);
@@ -69,57 +67,50 @@ function decodeBingRedirectUrl(rawHref = '') {
 
 export async function fetchVideos(query, page = 1, options = {}) {
   const { engine = 'bing', safeSearch = 'off', count = 20 } = options;
+  console.log(`[Video Service] Bắt đầu tìm: "${query}" - Trang: ${page} - Engine: ${engine}`);
 
   if (engine === 'yandex' || engine === 'duckduckgo') {
     const ddgResults = await fetchDuckDuckGoVideos(query, page, { safeSearch, count });
-    if (ddgResults && ddgResults.length >= 5) return ddgResults;
+    if (ddgResults && ddgResults.length > 0) {
+      console.log(`[Video Service] DDG tìm thấy: ${ddgResults.length} video`);
+      return ddgResults;
+    }
+    console.log(`[Video Service] DDG rỗng, tự động fallback sang Bing Videos`);
     return await fetchBingVideos(query, page, { safeSearch, count });
   }
 
-  return await fetchBingVideos(query, page, { safeSearch, count });
+  const bingResults = await fetchBingVideos(query, page, { safeSearch, count });
+  console.log(`[Video Service] Bing tìm thấy: ${bingResults.length} video`);
+  return bingResults;
 }
 
-// ====================================================================
-// ==================== BING (SafeSearch: OFF) ========================
-// ====================================================================
+// ====================== BING VIDEOS ======================
 async function fetchBingVideos(query, page = 1, options = {}) {
   const { count = 20 } = options;
   const cleanQuery = encodeURIComponent(query.trim());
 
   let aggregatedResults = [];
   const seenUrls = new Set();
-
-  const maxBatches = 2;
-  const batchSize = 30;
   const pageBaseFirst = (Math.max(1, page) - 1) * count + 1;
 
-  for (let b = 0; b < maxBatches; b++) {
-    const currentFirst = pageBaseFirst + b * batchSize;
-    const targetUrl = `https://www.bing.com/videos/search?q=${cleanQuery}&first=${currentFirst}&count=${batchSize}&adlt=off&setmkt=en-US&setlang=en`;
+  const targetUrl = `https://www.bing.com/videos/search?q=${cleanQuery}&first=${pageBaseFirst}&count=${count * 2}&adlt=off&setmkt=en-US&setlang=en`;
 
-    try {
-      const res = await axios.get(targetUrl, {
-        httpsAgent,
-        headers: {
-          ...BROWSER_HEADERS,
-          'Cookie': 'SRCHHPGUSR=ADLT=OFF&NRSLT=-1; _EDGE_S=mkt=en-US&ui=en-US&F=1; MUIDB=1;',
-          'Referer': 'https://www.bing.com/',
-        },
-        timeout: 9000,
-      });
+  try {
+    const res = await axios.get(targetUrl, {
+      httpsAgent,
+      headers: {
+        ...BROWSER_HEADERS,
+        'Cookie': 'SRCHHPGUSR=ADLT=OFF&NRSLT=-1; _EDGE_S=mkt=en-US&ui=en-US&F=1; MUIDB=1;',
+        'Referer': 'https://www.bing.com/',
+      },
+      timeout: 10000,
+    });
 
-      if (res.data && typeof res.data === 'string') {
-        const batchVideos = parseBingHtml(res.data, query, seenUrls);
-        aggregatedResults.push(...batchVideos);
-
-        if (aggregatedResults.length >= count) {
-          break;
-        }
-      }
-    } catch (err) {
-      console.warn(`Bing batch ${b + 1} warning:`, err.message);
-      break;
+    if (res.data && typeof res.data === 'string') {
+      aggregatedResults = parseBingHtml(res.data, query, seenUrls);
     }
+  } catch (err) {
+    console.warn(`[Bing Video Error]:`, err.message);
   }
 
   return aggregatedResults.slice(0, count);
@@ -149,8 +140,7 @@ function parseBingHtml(html, query, seenUrls = new Set()) {
           meta = JSON.parse(rawMeta);
         } catch {
           try {
-            const unescaped = rawMeta.replace(/&quot;/g, '"');
-            meta = JSON.parse(unescaped);
+            meta = JSON.parse(rawMeta.replace(/&quot;/g, '"'));
           } catch {}
         }
       }
@@ -225,52 +215,37 @@ function parseBingHtml(html, query, seenUrls = new Set()) {
   return results;
 }
 
-// ====================================================================
-// ================= DUCKDUCKGO (SafeSearch: OFF - p=-2) ==============
-// ====================================================================
+// ====================== DUCKDUCKGO VIDEOS ======================
 async function fetchDuckDuckGoVideos(query, page = 1, options = {}) {
   const { count = 20 } = options;
   const cleanQuery = encodeURIComponent(query.trim());
 
   try {
-    let vqd = null;
-    try {
-      const pageRes = await axios.get(
-        `https://duckduckgo.com/?q=${cleanQuery}&t=h_&ia=videos&kp=-2&p=-2`,
-        {
-          httpsAgent,
-          headers: {
-            ...BROWSER_HEADERS,
-            'Cookie': 'p=-2; kp=-2;',
-          },
-          timeout: 6000,
-        }
-      );
-
-      const match =
-        pageRes.data.match(/vqd=['"]([^'"]+)['"]/) ||
-        pageRes.data.match(/vqd=([\d-]+)/);
-
-      if (match && match[1]) {
-        vqd = match[1];
+    // 1. Lấy token vqd với timeout nhanh
+    const pageRes = await axios.get(
+      `https://duckduckgo.com/?q=${cleanQuery}&t=h_&ia=videos&kp=-2&p=-2`,
+      {
+        httpsAgent,
+        headers: {
+          ...BROWSER_HEADERS,
+          'Cookie': 'p=-2; kp=-2;',
+        },
+        timeout: 5000,
       }
-    } catch {}
+    );
 
-    if (!vqd) {
-      // Fallback lấy vqd trực tiếp nếu request đầu không khớp
-      try {
-        const vqdRes = await axios.get(`https://duckduckgo.com/?q=${cleanQuery}`, {
-          httpsAgent,
-          headers: BROWSER_HEADERS,
-          timeout: 4000,
-        });
-        const vqdMatch = vqdRes.data.match(/vqd=([\d-]+)/);
-        if (vqdMatch && vqdMatch[1]) vqd = vqdMatch[1];
-      } catch {}
+    let vqd = null;
+    const match =
+      pageRes.data.match(/vqd=['"]([^'"]+)['"]/) ||
+      pageRes.data.match(/vqd=([\d-]+)/);
+
+    if (match && match[1]) {
+      vqd = match[1];
     }
 
     if (!vqd) return [];
 
+    // 2. Gọi API video của DDG
     const offset = (Math.max(1, page) - 1) * count;
     const apiUrl = `https://duckduckgo.com/v.js?l=us-en&o=json&q=${cleanQuery}&vqd=${vqd}&f=,,,duration:&p=-2&kp=-2&s=${offset}`;
 
@@ -281,7 +256,7 @@ async function fetchDuckDuckGoVideos(query, page = 1, options = {}) {
         'Cookie': 'p=-2; kp=-2;',
         'Referer': 'https://duckduckgo.com/',
       },
-      timeout: 8000,
+      timeout: 7000,
     });
 
     const items = apiRes.data?.results || [];
@@ -316,6 +291,7 @@ async function fetchDuckDuckGoVideos(query, page = 1, options = {}) {
 
     return results.slice(0, count);
   } catch (err) {
+    console.warn(`[DDG Video Warning]:`, err.message);
     return [];
   }
 }
