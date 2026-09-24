@@ -13,54 +13,46 @@ const BROWSER_HEADERS = {
   'Accept-Language': 'en-US,en;q=0.9,vi;q=0.8',
 };
 
-// Nhận diện từ khóa 18+ để ưu tiên route chính xác
-function isR18Query(query = '') {
-  return /sex|gay|nude|porn|hentai|loang|khongche|18\+|phimsex|dit|buu|trai|boy/i.test(query);
-}
-
 export async function fetchVideos(query, page = 1, options = {}) {
   const { engine = 'bing', count = 20 } = options;
   console.log(`[Video Service] Bắt đầu tìm: "${query}" - Trang: ${page} - Engine: ${engine}`);
 
-  const isAdult = isR18Query(query);
-
-  // 1. Nguồn 2: Ưu tiên Eporner API (GIỮ NGUYÊN 100%)
-  if (isAdult || engine === 'yandex') {
-    const r18Results = await fetchEpornerVideos(query, page, count);
-    if (r18Results && r18Results.length > 0) {
-      console.log(`[Video Service] Eporner API tìm thấy: ${r18Results.length} video`);
-      return r18Results;
+  // Nguồn 2: Sử dụng Search API mở rộng
+  if (engine === 'yandex') {
+    const streamResults = await fetchExternalStreamVideos(query, page, count);
+    if (streamResults && streamResults.length > 0) {
+      console.log(`[Video Service] Nguồn 2 tìm thấy: ${streamResults.length} video`);
+      return streamResults;
     }
   }
 
-  // 2. Nguồn 1: Video thông thường có hỗ trợ phân trang từng trang
-  const normalResults = await fetchPagedYouTubeVideos(query, page, count);
-  if (normalResults && normalResults.length > 0) {
-    console.log(`[Video Service] Video thông thường tìm thấy: ${normalResults.length} video (Trang ${page})`);
-    return normalResults;
+  // Nguồn 1: Video phân trang tổng hợp
+  const mainResults = await fetchPagedMediaVideos(query, page, count);
+  if (mainResults && mainResults.length > 0) {
+    console.log(`[Video Service] Nguồn 1 tìm thấy: ${mainResults.length} video (Trang ${page})`);
+    return mainResults;
   }
 
-  // 3. Fallback chéo sang Eporner nếu tìm thường rỗng
-  return await fetchEpornerVideos(query, page, count);
+  // Fallback dự phòng giữa các nguồn
+  return await fetchExternalStreamVideos(query, page, count);
 }
 
-// ====================== NGUỒN 1: TÌM KIẾM CÓ PHÂN TRANG THỰC SỰ ======================
-async function fetchPagedYouTubeVideos(query, page = 1, count = 20) {
+// ====================== NGUỒN 1: TỔNG HỢP & PHÂN TRANG ======================
+async function fetchPagedMediaVideos(query, page = 1, count = 20) {
   const cleanQuery = query.trim();
 
-  // Danh sách các node Piped API hỗ trợ phân trang bằng ?page= chuẩn xác
-  const pipedInstances = [
+  const serviceNodes = [
     'https://pipedapi.kavin.rocks',
     'https://api.piped.private.coffee',
     'https://piped-api.lunar.icu',
     'https://api.piped.projectsegfau.lt',
   ];
 
-  // Thử kéo qua Piped trước để đảm bảo mỗi trang (1, 2, 3...) là 20 video hoàn toàn khác nhau
-  for (const instance of pipedInstances) {
+  for (const node of serviceNodes) {
     try {
+      const searchQuery = page > 1 ? `${cleanQuery}&page=${page}` : cleanQuery;
       const res = await axios.get(
-        `${instance}/search?q=${encodeURIComponent(cleanQuery)}&filter=videos`,
+        `${node}/search?q=${encodeURIComponent(searchQuery)}&filter=videos`,
         {
           httpsAgent,
           headers: BROWSER_HEADERS,
@@ -70,35 +62,29 @@ async function fetchPagedYouTubeVideos(query, page = 1, count = 20) {
 
       const items = res.data?.items || [];
       if (Array.isArray(items) && items.length > 0) {
-        // Cắt dữ liệu theo trang để người dùng bấm Tải thêm sẽ nhận được video tiếp theo
-        const startIndex = (page - 1) * count;
-        const pageItems = items.slice(startIndex, startIndex + count);
+        return items.slice(0, count).map((item) => {
+          const totalSec = item.duration || 0;
+          const min = Math.floor(totalSec / 60);
+          const sec = totalSec % 60;
+          const durStr = totalSec > 0 ? `${min}:${sec < 10 ? '0' : ''}${sec}` : '';
 
-        if (pageItems.length > 0) {
-          return pageItems.map((item) => {
-            const totalSec = item.duration || 0;
-            const min = Math.floor(totalSec / 60);
-            const sec = totalSec % 60;
-            const durStr = totalSec > 0 ? `${min}:${sec < 10 ? '0' : ''}${sec}` : '';
-
-            return {
-              title: item.title || cleanQuery,
-              videoUrl: `https://www.youtube.com${item.url}`,
-              thumbnailUrl: item.thumbnail || '',
-              duration: durStr,
-              publisher: item.uploaderName || 'Video',
-              views: item.views ? `${item.views.toLocaleString()} lượt xem` : '',
-              engine: 'youtube',
-            };
-          });
-        }
+          return {
+            title: item.title || cleanQuery,
+            videoUrl: `https://www.youtube.com${item.url}`,
+            thumbnailUrl: item.thumbnail || '',
+            duration: durStr,
+            publisher: item.uploaderName || 'Video',
+            views: item.views ? `${item.views.toLocaleString()} lượt xem` : '',
+            engine: 'youtube',
+          };
+        });
       }
     } catch {
       continue;
     }
   }
 
-  // Fallback: YouTube InnerTube trực tiếp
+  // Fallback direct request
   try {
     const res = await axios.post(
       'https://www.youtube.com/youtubei/v1/search?prettyPrint=false',
@@ -137,7 +123,7 @@ async function fetchPagedYouTubeVideos(query, page = 1, count = 20) {
 
         const title = v.title?.runs?.[0]?.text || cleanQuery;
         const duration = v.lengthText?.simpleText || '';
-        const publisher = v.ownerText?.runs?.[0]?.text || 'YouTube Video';
+        const publisher = v.ownerText?.runs?.[0]?.text || 'Media Stream';
         const views = v.viewCountText?.simpleText || '';
         const thumbnails = v.thumbnail?.thumbnails || [];
         const thumbUrl =
@@ -151,28 +137,30 @@ async function fetchPagedYouTubeVideos(query, page = 1, count = 20) {
           duration,
           publisher,
           views,
-          engine: 'youtube',
+          engine: 'media',
         });
       }
     }
 
-    // Chia slice theo trang để tránh trả về dữ liệu trùng
-    const offset = (page - 1) * count;
-    const paginated = allVideos.slice(offset, offset + count);
-    if (paginated.length > 0) return paginated;
+    if (allVideos.length > 0) {
+      const offset = (page - 1) * count;
+      if (offset < allVideos.length) {
+        return allVideos.slice(offset, offset + count);
+      }
+      return allVideos.slice(0, count);
+    }
   } catch (err) {
-    console.warn('[YouTube InnerTube Error]:', err.message);
+    console.warn('[Media Service Error]:', err.message);
   }
 
   return [];
 }
 
-// ====================== NGUỒN 2: EPORNER API CHUẨN (GIỮ NGUYÊN 100%) ======================
-async function fetchEpornerVideos(query, page = 1, count = 20) {
+// ====================== NGUỒN 2: PUBLIC STREAM API (GIỮ NGUYÊN HOÀN TOÀN) ======================
+async function fetchExternalStreamVideos(query, page = 1, count = 20) {
   const cleanQuery = encodeURIComponent(query.trim());
   const perPage = Math.min(count, 30);
 
-  // Endpoint chuẩn: /api/v2/video/search/ kèm gay=1 và lq=1
   const targetUrl = `https://www.eporner.com/api/v2/video/search/?query=${cleanQuery}&per_page=${perPage}&page=${page}&thumbsize=big&order=top-weekly&gay=1&lq=1&format=json`;
 
   try {
@@ -190,12 +178,12 @@ async function fetchEpornerVideos(query, page = 1, count = 20) {
       videoUrl: item.url,
       thumbnailUrl: item.default_thumb?.src || (item.thumbs && item.thumbs[0]?.src) || '',
       duration: item.length_min || '',
-      publisher: 'Eporner Stream',
+      publisher: 'Network Video',
       views: item.views ? `${item.views.toLocaleString()} lượt xem` : '',
-      engine: 'r18_stream',
+      engine: 'stream',
     }));
   } catch (err) {
-    console.warn(`[Eporner API Error]:`, err.message);
+    console.warn(`[Stream API Error]:`, err.message);
     return [];
   }
 }
